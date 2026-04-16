@@ -126,8 +126,9 @@
 //     return Response.json({ error: "Something went wrong" }, { status: 500 });
 //   }
 // }
-
 import { NextRequest } from 'next/server';
+import { getUsage, incrementUsage } from '@/lib/usage';
+import { getIP } from '@/lib/ip';
 
 const TONE_INSTRUCTIONS: Record<string, string> = {
   persuasive: 'Focus on benefits and emotional appeal. Be conversational and compelling.',
@@ -138,8 +139,18 @@ const TONE_INSTRUCTIONS: Record<string, string> = {
 
 export async function POST(req: NextRequest) {
   try {
+    const ip   = getIP(req);
     const body = await req.json();
     const { input, tone = 'persuasive' } = body;
+
+    if (!input?.trim()) {
+      return Response.json({ error: 'Input is required' }, { status: 400 });
+    }
+
+    const usage = await getUsage(ip);
+    if (!usage.canGenerate) {
+      return Response.json({ error: 'limit_reached', remaining: 0 }, { status: 402 });
+    }
 
     const toneInstruction = TONE_INSTRUCTIONS[tone] ?? TONE_INSTRUCTIONS.persuasive;
 
@@ -156,46 +167,46 @@ Instructions:
 - Target Indian audience, mention price naturally
 - Make ads scroll-stopping
 
-Use EXACTLY this format (no extra text before or after):
+Use EXACTLY this format with no extra text before or after:
 
 ---AD1---
 Style: Emotional
-Headline: <headline>
-Body: <body>
-CTA: <cta>
+Headline: <headline here>
+Body: <body copy here>
+CTA: <cta here>
 
 ---AD2---
 Style: Problem-Solution
-Headline: <headline>
-Body: <body>
-CTA: <cta>
+Headline: <headline here>
+Body: <body copy here>
+CTA: <cta here>
 
 ---AD3---
 Style: Discount / Offer
-Headline: <headline>
-Body: <body>
-CTA: <cta>
+Headline: <headline here>
+Body: <body copy here>
+CTA: <cta here>
 
 ---AD4---
 Style: Premium Branding
-Headline: <headline>
-Body: <body>
-CTA: <cta>
+Headline: <headline here>
+Body: <body copy here>
+CTA: <cta here>
 
 ---AD5---
 Style: Urgency / FOMO
-Headline: <headline>
-Body: <body>
-CTA: <cta>
+Headline: <headline here>
+Body: <body copy here>
+CTA: <cta here>
 `.trim();
 
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
+        'Content-Type':  'application/json',
         'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000',
-        'X-Title': 'AdGenie AI',
+        'HTTP-Referer':  process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000',
+        'X-Title':       'AdGenie AI',
       },
       body: JSON.stringify({
         model: 'openai/gpt-oss-120b:free',
@@ -205,21 +216,21 @@ CTA: <cta>
 
     const data = await response.json();
 
-    console.log('OPENROUTER RESPONSE:', data);
-
     if (!data.choices) {
-      return Response.json({ error: data }, { status: 500 });
+      console.error('OpenRouter error:', data);
+      return Response.json({ error: 'AI service error' }, { status: 500 });
     }
 
+    await incrementUsage(ip);
+
     const raw: string = data.choices[0].message.content;
-
-    // Parse the structured ---AD1--- ... sections into an array
     const ads = parseAds(raw);
+    const updatedUsage = await getUsage(ip);
 
-    return Response.json({ output: raw, ads });
+    return Response.json({ ads, output: raw, remaining: updatedUsage.remaining });
 
   } catch (error) {
-    console.error('ERROR:', error);
+    console.error('Generate error:', error);
     return Response.json({ error: 'Something went wrong' }, { status: 500 });
   }
 }
@@ -233,18 +244,11 @@ interface ParsedAd {
 
 function parseAds(raw: string): ParsedAd[] {
   const blocks = raw.split(/---AD\d+---/).map((b) => b.trim()).filter(Boolean);
-
   return blocks.map((block) => {
     const get = (field: string) => {
       const match = block.match(new RegExp(`${field}:\\s*(.+?)(?=\\n[A-Z]|$)`, 'si'));
       return match ? match[1].trim() : '';
     };
-
-    return {
-      style:    get('Style'),
-      headline: get('Headline'),
-      body:     get('Body'),
-      cta:      get('CTA'),
-    };
+    return { style: get('Style'), headline: get('Headline'), body: get('Body'), cta: get('CTA') };
   });
 }
